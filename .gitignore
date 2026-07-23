@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+cmt_breakout_setups.csv
+ohlcv_raw.json
+.env
