@@ -135,21 +135,27 @@ def get_ohlcv(symbols):
                        group_by="ticker", auto_adjust=False, threads=True,
                        progress=False)
     out = {}
+    multi = isinstance(data.columns, pd.MultiIndex)
     for sym in tickers:
         try:
-            if len(tickers) == 1:
-                sub = data.copy()
-            else:
+            if multi:
+                if sym not in data.columns.get_level_values(0):
+                    continue
                 sub = data[sym].copy()
+            else:
+                sub = data.copy()          # single-ticker download
             sub = sub.dropna(how="all")
             if sub.empty:
                 continue
-            sub = sub.rename(columns=str.lower).reset_index()
+            # reset index FIRST, then lowercase every column (incl. the date index)
+            sub = sub.reset_index()
+            sub.columns = [str(c).lower() for c in sub.columns]
             sub = sub.rename(columns={"date": "datetime", "index": "datetime"})
-            keep_cols = ["datetime", "open", "high", "low", "close", "volume"]
-            sub = sub[[c for c in keep_cols if c in sub.columns]]
-            if {"open", "high", "low", "close", "volume"}.issubset(sub.columns):
-                out[sym] = sub.sort_values("datetime").reset_index(drop=True)
+            need = {"open", "high", "low", "close", "volume"}
+            if not need.issubset(sub.columns) or "datetime" not in sub.columns:
+                continue
+            sub = sub[["datetime", "open", "high", "low", "close", "volume"]]
+            out[sym] = sub.sort_values("datetime").reset_index(drop=True)
         except Exception as e:
             print(f"  {sym}: OHLCV parse failed ({e})")
     return out
