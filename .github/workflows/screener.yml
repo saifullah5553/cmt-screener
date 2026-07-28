@@ -1,21 +1,26 @@
 name: CMT Breakout Screener
 
-# Runs every weekday at 21:30 UTC.
-#   - After the 4:00pm ET US market close year-round:
-#       * EDT (summer): 21:30 UTC = 17:30 ET
-#       * EST (winter): 21:30 UTC = 16:30 ET
-#   - The script itself skips US market HOLIDAYS (weekends are excluded by the
-#     cron day-of-week filter 1-5 = Mon-Fri).
-# GitHub may delay scheduled runs by a few minutes under load — that's fine here.
+# Runs every weekday at 21:30 UTC = after the 4:00pm ET US close year-round
+#   * EDT (summer): 21:30 UTC = 17:30 ET
+#   * EST (winter): 21:30 UTC = 16:30 ET
+# GitHub cron is always UTC and does NOT observe daylight saving, so a fixed
+# UTC time is intentional. The script skips US market holidays itself; the
+# 1-5 (Mon-Fri) filter excludes weekends.
 on:
   schedule:
     - cron: '30 21 * * 1-5'
-  workflow_dispatch:        # allows a manual "Run workflow" button in the Actions tab
+  workflow_dispatch:        # manual "Run workflow" button in the Actions tab
     inputs:
       force_run:
         description: 'Bypass the trading-day gate (for testing)'
         required: false
         default: 'false'
+
+# Lets the job push a small heartbeat commit back to the repo after each run.
+# That daily activity keeps GitHub from silently parking the schedule, and
+# leaves a visible "last ran" marker in last_run.txt.
+permissions:
+  contents: write
 
 jobs:
   screen:
@@ -53,3 +58,16 @@ jobs:
             cmt_breakout_setups.csv
           if-no-files-found: ignore
           retention-days: 30
+
+      # Heartbeat: always leaves a fresh commit so the repo never looks idle and
+      # GitHub keeps firing the daily schedule. Runs even if the screener step
+      # failed, so a quiet day still counts as activity.
+      - name: Heartbeat commit (keeps the daily schedule alive)
+        if: always()
+        run: |
+          date -u +"last run: %Y-%m-%dT%H:%M:%SZ  (run #${GITHUB_RUN_NUMBER})" > last_run.txt
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last_run.txt
+          git commit -m "chore: screener heartbeat" || echo "nothing to commit"
+          git push
