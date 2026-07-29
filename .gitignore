@@ -1,5 +1,7 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 cmt_breakout_setups.csv
 ohlcv_raw.json
+cache.pkl
 .env
+.pytest_cache/

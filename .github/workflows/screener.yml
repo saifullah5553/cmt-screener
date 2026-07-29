@@ -37,16 +37,36 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Fast unit tests (no network) — catches a broken deploy BEFORE the
+      # screen runs, rather than discovering it from a silent empty alert.
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
       - name: Run screener
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          SCREENER_LIMIT:     '50'
+          # --- universe --------------------------------------------------
+          SCREENER_LIMIT:     '120'   # movers examined per session
+          INCLUDE_US:         'true'  # NYSE / NASDAQ / AMEX
+          INCLUDE_ASX:        'true'  # Australian Securities Exchange
+          # --- liquidity (institutions cannot trade illiquid names) -------
           MIN_PRICE:          '5'
-          MIN_CHANGE_PCT:     '2.0'
-          MIN_DOLLAR_VOL:     '5000000'
+          MIN_DOLLAR_VOL:     '10000000'
+          MIN_CHANGE_PCT:     '1.5'
+          # --- breakout quality ------------------------------------------
+          MIN_VOL_RATIO:      '1.4'   # volume expansion vs 50-day average
+          MIN_CLOSE_RANGE_POS: '0.55' # close in upper half of the day's range
+          MAX_EXT_FROM_PIVOT: '8.0'   # do not chase extended breakouts
+          MIN_RS_RATING:      '70'    # must outperform the market
+          MIN_RR:             '2.0'   # minimum reward:risk
+          MIN_SCORE:          '70'
+          MAX_ALERTS:         '20'
           INCLUDE_GRADE_B:    'true'
-          MIN_RR:             '2.0'
+          # --- watchlist: set up but not yet triggered --------------------
+          WATCH_ENABLED:      'true'
+          WATCH_WITHIN_PCT:   '4.0'   # how close beneath the pivot to track
+          MAX_WATCH:          '10'
           FORCE_RUN:          ${{ github.event.inputs.force_run || 'false' }}
         run: python cmt_screener.py
 
