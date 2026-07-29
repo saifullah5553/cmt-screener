@@ -24,7 +24,7 @@ import os
 import sys
 import json
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -59,6 +59,31 @@ def is_trading_day(d):
     except Exception:
         from nyse_cal import is_trading_day as fallback
         return fallback(d)
+
+def prev_trading_day(d):
+    """Most recent NYSE session strictly BEFORE date `d` (steps back over
+    weekends/holidays). Returns None if none found in a two-week window."""
+    p = d - timedelta(days=1)
+    for _ in range(15):
+        if is_trading_day(p):
+            return p
+        p -= timedelta(days=1)
+    return None
+
+def resolve_session(now_ny):
+    """Return (session_date, closed_today) for the most recent COMPLETED US
+    session as of `now_ny` (a tz-aware America/New_York datetime).
+
+    This job is scheduled for ~00:15-01:15 ET (9:15am Dubai), i.e. after the US
+    close and before the next open, so the freshest finished session is the
+    PREVIOUS trading day -- that's the "yesterday's data" we analyze. If the job
+    is ever run after 16:00 ET on a trading day (e.g. a manual afternoon test),
+    today's just-closed session is used instead."""
+    d = now_ny.date()
+    market_close = now_ny.replace(hour=16, minute=0, second=0, microsecond=0)
+    if is_trading_day(d) and now_ny >= market_close:
+        return d, True
+    return prev_trading_day(d), False
 
 # ------------------------------------------------------------------- data sourcing
 def get_candidates(limit):
@@ -368,17 +393,28 @@ def build_alert(df, day, n_scanned):
 
 # ----------------------------------------------------------------------------- main
 def main():
-    today = datetime.now(NY).date()
-    print(f"=== CMT auto-screener run for {today} (America/New_York) ===")
+    now_ny = datetime.now(NY)
+    session_date, closed_today = resolve_session(now_ny)
+    print(f"=== CMT auto-screener — fired {now_ny:%Y-%m-%d %H:%M} ET "
+          f"| target US session: {session_date} ===")
 
-    if not FORCE_RUN and not is_trading_day(today):
-        print(f"{today} is not a US market trading day (weekend/holiday). Exiting cleanly.")
-        return
+    # Gate: only act when there is a fresh, not-yet-reported session. The job
+    # runs every morning (9:15am Dubai); on weekends/holidays the most recent
+    # session is >1 day old and already covered, so we exit without re-alerting.
+    if not FORCE_RUN:
+        if session_date is None:
+            print("No recent US trading session found. Exiting cleanly.")
+            return
+        age_days = (now_ny.date() - session_date).days
+        if not closed_today and age_days > 1:
+            print(f"Latest US session {session_date} is {age_days} day(s) old — "
+                  f"already covered / nothing new (weekend or holiday). Exiting cleanly.")
+            return
 
     candidates = get_candidates(SCREENER_LIMIT)
     print(f"Candidates: {len(candidates)}")
     if not candidates:
-        telegram_message(f"*CMT Breakout Screen — {today}*\nNo gainer candidates returned "
+        telegram_message(f"*CMT Breakout Screen — {session_date}*\nNo gainer candidates returned "
                          f"(data source issue). No analysis run.")
         print("No candidates; exiting.")
         return
@@ -391,6 +427,8 @@ def main():
     if BENCHMARK in ohlcv and len(ohlcv[BENCHMARK]) >= 21:
         bc = ohlcv[BENCHMARK]["close"]
         bench_ret = float(bc.iloc[-1]) / float(bc.iloc[-21]) - 1
+        last_bar = ohlcv[BENCHMARK]["datetime"].iloc[-1]
+        print(f"Latest {BENCHMARK} daily bar: {last_bar}  (analyzing session {session_date})")
 
     rows, failed = [], []
     for s in syms:
@@ -413,9 +451,9 @@ def main():
     print(f"\nGrade A: {n_a} | Grade B: {n_b} | skipped(no data): {len(failed)}")
 
     if not df.empty:
-        telegram_message(build_alert(df, today, len(candidates)))
+        telegram_message(build_alert(df, session_date, len(candidates)))
         if n_a or (INCLUDE_GRADE_B and n_b):
-            telegram_document("cmt_breakout_setups.csv", f"CMT breakout table {today}")
+            telegram_document("cmt_breakout_setups.csv", f"CMT breakout table {session_date}")
 
 if __name__ == "__main__":
     main()
