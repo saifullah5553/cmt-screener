@@ -194,6 +194,100 @@ class TestPatterns:
         assert np.isfinite(out["pivot"])
 
 
+# ---------------------------------------------------------------- markets
+class TestMultiMarket:
+    """The job runs once at a moment when every market is closed, but must
+    still be correct if GitHub fires it late and a market has re-opened."""
+
+    from zoneinfo import ZoneInfo as _Z
+    UTC = _Z("UTC")
+
+    def _at(self, y, m, d, h, mi=0):
+        return datetime(y, m, d, h, mi, tzinfo=self.UTC)
+
+    def test_all_markets_closed_at_scheduled_time(self):
+        """13:00 UTC (17:00 Dubai) must be all-closed in BOTH DST regimes."""
+        from screener import markets as mk
+        for month, day in ((1, 14), (7, 15)):
+            t = self._at(2026, month, day, 13, 0)
+            still_open = [m.code for m in mk.resolve(["ALL"]) if m.is_open(t)]
+            assert still_open == [], f"month {month}: {still_open} open at 13:00Z"
+
+    def test_us_reports_previous_session_at_scheduled_time(self):
+        """At 13:00 UTC the US has not opened yet, so it reports yesterday."""
+        from screener import markets as mk
+        t = self._at(2026, 7, 29, 13, 0)          # Wednesday
+        us = mk.get("US")
+        assert us.is_open(t) is False
+        assert us.last_completed_session(t) == date(2026, 7, 28)
+
+    def test_asia_gulf_report_same_day_at_scheduled_time(self):
+        """Asia and Gulf have closed by 13:00 UTC, so they report TODAY."""
+        from screener import markets as mk
+        t = self._at(2026, 7, 29, 13, 0)
+        for code in ("IN", "PK", "SA", "AE", "QA", "KW"):
+            assert mk.get(code).last_completed_session(t) == date(2026, 7, 29), code
+
+    def test_open_market_falls_back_to_previous_session(self):
+        """At 09:15 Dubai the Indian market is mid-session -> yesterday."""
+        from screener import markets as mk
+        t = self._at(2026, 7, 29, 5, 15)          # 09:15 Dubai, Wednesday
+        india = mk.get("IN")
+        assert india.is_open(t) is True
+        assert india.last_completed_session(t) == date(2026, 7, 28)
+
+    def test_closed_market_uses_todays_session(self):
+        from screener import markets as mk
+        t = self._at(2026, 7, 29, 21, 30)         # after every close
+        assert mk.get("IN").last_completed_session(t) == date(2026, 7, 29)
+
+    def test_gulf_weekend_is_friday_saturday(self):
+        from screener import markets as mk
+        sa = mk.get("SA")
+        assert sa.is_trading_day(date(2026, 7, 3)) is False   # Friday
+        assert sa.is_trading_day(date(2026, 7, 4)) is False   # Saturday
+        assert sa.is_trading_day(date(2026, 7, 5)) is True    # Sunday trades
+
+    def test_us_weekend_is_saturday_sunday(self):
+        from screener import markets as mk
+        us = mk.get("US")
+        assert us.is_trading_day(date(2026, 8, 1)) is False   # Saturday
+        assert us.is_trading_day(date(2026, 7, 31)) is True   # Friday
+
+    def test_market_inferred_from_suffix(self):
+        from screener import markets as mk
+        assert mk.market_of("RELIANCE.NS") == "IN"
+        assert mk.market_of("OGDC.KA") == "PK"
+        assert mk.market_of("2222.SR") == "SA"
+        assert mk.market_of("BHP.AX") == "AU"
+        assert mk.market_of("AAPL") == "US"
+
+    def test_static_universes_are_populated_where_discovery_fails(self):
+        from screener import markets as mk
+        for code in ("PK", "AE", "QA"):
+            m = mk.get(code)
+            assert m.region is None and len(m.universe) >= 5
+
+    def test_partial_bar_not_repaired_when_market_open(self):
+        """Guards the multi-market data hazard: patching a NaN close from a
+        live quote while the market trades would fabricate a candle."""
+        df = make_df(60)
+        n = len(df)
+        df.loc[df.index[-1], "close"] = np.nan
+        out = marketdata.repair_last_bar(df.copy(), "RELIANCE.NS",
+                                         {"regularMarketPrice": 999.0},
+                                         allow_quote=False)
+        assert len(out) == n - 1
+        assert 999.0 not in out["close"].values
+
+    def test_trim_to_session_drops_future_bars(self):
+        df = make_df(40)
+        target = df["datetime"].iloc[-3].date()
+        out = marketdata.trim_to_session(df, target)
+        assert out["datetime"].iloc[-1].date() == target
+        assert len(out) == len(df) - 2
+
+
 # -------------------------------------------------------------- watchlist
 class TestWatchlist:
     """A watch name is one whose ONLY failing test is that price has not yet

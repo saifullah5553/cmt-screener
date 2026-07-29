@@ -1,12 +1,21 @@
-"""Pipeline orchestration: gate → universe → data → regime → analyse → alert."""
+"""Pipeline orchestration: gate -> universe -> data -> regime -> analyse -> alert.
+
+Multi-market design: the job runs ONCE at 09:15 Dubai. Each market is resolved
+to its own last COMPLETED session, so markets still trading at that moment
+(India, Pakistan, ASX) are analysed on yesterday's candle rather than on a
+partial bar. See markets.py for the timing rule.
+"""
 from __future__ import annotations
 
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from . import analysis, marketdata, notify, regime as regime_mod, sessions, strength, universe
+from . import analysis, marketdata, notify, regime as regime_mod
+from . import markets as mk
+from . import strength, universe
 from .config import CONFIG
 
 log = logging.getLogger("screener")
@@ -14,7 +23,7 @@ log = logging.getLogger("screener")
 CSV_PATH = "cmt_breakout_setups.csv"
 
 CSV_COLUMNS = [
-    "symbol", "company", "exchange", "market", "sector", "industry",
+    "symbol", "company", "exchange", "market", "session", "sector", "industry",
     "grade", "score", "stage_name", "pattern", "base_weeks", "vcp_contractions",
     "trend_score", "base_score", "volume_score", "rs_rating", "sector_label",
     "weekly_trend", "monthly_trend", "higher_highs", "higher_lows",
@@ -39,32 +48,52 @@ def run(cfg=None) -> int:
     cfg = cfg or CONFIG
     setup_logging(cfg.log_level)
     started = datetime.now()
+    now_utc = datetime.now(ZoneInfo("UTC"))
 
-    ok, session, reason = sessions.should_run(force=cfg.force_run)
-    log.info("Session gate: %s (target session=%s)", reason, session)
-    if not ok:
-        log.info("Nothing to do. Exiting cleanly.")
+    active = mk.resolve(cfg.markets)
+    sessions = {}
+    for m in active:
+        s = m.last_completed_session(now_utc)
+        sessions[m.code] = s
+        log.info("%-3s %-22s session=%s%s", m.code, m.name, s,
+                 "  (market OPEN — using previous close)" if m.is_open(now_utc) else "")
+
+    if not any(sessions.values()) and not cfg.force_run:
+        log.info("No completed sessions across any market. Exiting cleanly.")
         return 0
 
     # ---- 1. universe -------------------------------------------------
     cands = universe.build(cfg)
-    log.info("Universe: %d candidates across markets", len(cands))
+    log.info("Universe: %d candidates across %d markets", len(cands), len(active))
     if not cands:
-        notify.send_message(
-            f"*CMT Breakout Screen — {session}*\nNo candidates returned "
-            f"(upstream data issue). No analysis run.", cfg)
+        notify.send_message("*Breakout Screen*\nNo candidates returned "
+                            "(upstream data issue). No analysis run.", cfg)
         return 0
 
     quotes = {c.symbol: c.quote for c in cands}
-    markets = {c.symbol: c.market for c in cands}
+    markets_of = {c.symbol: c.market for c in cands}
     symbols = [c.symbol for c in cands]
 
-    # ---- 2. data (candidates + benchmarks + sector ETFs + indices) ----
-    aux = list(dict.fromkeys(
-        [cfg.benchmark, cfg.asx_benchmark] + cfg.sector_etfs + regime_mod.INDEX_SYMBOLS))
+    # ---- 2. data ------------------------------------------------------
+    benchmarks = [m.benchmark for m in active if m.benchmark]
+    aux = list(dict.fromkeys(benchmarks + cfg.sector_etfs + regime_mod.INDEX_SYMBOLS))
+
+    open_markets = {m.code for m in active if m.is_open(now_utc)}
+
+    def may_repair(sym):
+        # Only patch an unsettled bar for markets that have finished trading.
+        return markets_of.get(sym, mk.market_of(sym)) not in open_markets
+
     frames = marketdata.download_ohlcv(symbols + aux, period=cfg.history_period,
-                                       quotes=quotes)
+                                       quotes=quotes, allow_repair=may_repair)
     log.info("Downloaded %d/%d frames", len(frames), len(symbols) + len(aux))
+
+    # Guarantee the last bar of every tradable frame is a COMPLETED session.
+    for sym in symbols:
+        if sym in frames:
+            s = sessions.get(markets_of.get(sym))
+            if s:
+                frames[sym] = marketdata.trim_to_session(frames[sym], s)
 
     # ---- 3. regime ----------------------------------------------------
     try:
@@ -75,11 +104,12 @@ def run(cfg=None) -> int:
     log.info("Regime: %s | strictness x%.2f", reg["summary"], reg["strictness"])
 
     # ---- 4. relative strength + sector leadership ---------------------
-    benches = {"US": frames.get(cfg.benchmark), "ASX": frames.get(cfg.asx_benchmark)}
+    benches = {m.code: frames.get(m.benchmark) for m in active}
     tradables = {s: frames[s] for s in symbols if s in frames}
-    rs = strength.rate_universe(tradables, benches, markets)
+    rs = strength.rate_universe(tradables, benches, markets_of)
     sector_ranks = strength.rank_sectors(
-        {e: frames[e] for e in cfg.sector_etfs if e in frames}, frames.get(cfg.benchmark))
+        {e: frames[e] for e in cfg.sector_etfs if e in frames},
+        frames.get("SPY"))
     log.info("Ranked %d sector ETFs", len(sector_ranks))
 
     meta = _fetch_meta(symbols)
@@ -97,8 +127,9 @@ def run(cfg=None) -> int:
         if not good:
             skipped.append((sym, why))
             continue
+        session = sessions.get(markets_of.get(sym))
         stale = marketdata.freshness(df, session)
-        if stale > 4:
+        if stale > 5:
             skipped.append((sym, f"stale data ({stale}d)"))
             continue
         try:
@@ -109,16 +140,17 @@ def run(cfg=None) -> int:
             skipped.append((sym, f"analysis error: {e}"))
             continue
         row.update(meta.get(sym, {}))
-        row.setdefault("exchange", markets.get(sym))
+        row["market"] = markets_of.get(sym, row.get("market"))
+        row["session"] = str(session)
+        row.setdefault("exchange", row["market"])
         rows.append(row)
 
     log.info("Analysed %d symbols (%d skipped)", len(rows), len(skipped))
     if skipped:
-        log.debug("Skipped: %s", skipped[:15])
+        log.debug("Skipped sample: %s", skipped[:15])
 
     if not rows:
-        notify.send_message(f"*CMT Breakout Screen — {session}*\n"
-                            f"No analysable symbols today.", cfg)
+        notify.send_message("*Breakout Screen*\nNo analysable symbols today.", cfg)
         return 0
 
     rows.sort(key=lambda r: (GRADE_ORDER.get(r["grade"], 9), -r["score"]))
@@ -130,25 +162,25 @@ def run(cfg=None) -> int:
             df_out[c] = None
     df_out[CSV_COLUMNS].to_csv(CSV_PATH, index=False)
 
-    counts = df_out["grade"].value_counts().to_dict()
-    log.info("Grades: %s", counts)
+    log.info("Grades: %s", df_out["grade"].value_counts().to_dict())
+    log.info("By market: %s", df_out[df_out.grade.isin(["A", "B", "W"])]
+             ["market"].value_counts().to_dict() or "none")
     _log_table(rows)
 
-    msgs = notify.build_messages(session, reg, len(cands), rows, cfg)
-    for m in msgs:
+    for m in notify.build_messages(sessions, reg, len(cands), rows, cfg):
         notify.send_message(m, cfg)
     if any(r["grade"] in ("A", "B", "W") for r in rows):
-        notify.send_document(CSV_PATH, f"CMT institutional screen — {session}", cfg)
+        notify.send_document(CSV_PATH, "Breakout screen detail", cfg)
 
     log.info("Done in %.1fs", (datetime.now() - started).total_seconds())
     return 0
 
 
 def _log_table(rows, n=25):
-    cols = ["symbol", "grade", "score", "stage_name", "pattern", "base_weeks",
-            "rs_rating", "vol_ratio", "rr", "entry", "stop", "target1",
+    cols = ["symbol", "market", "grade", "score", "stage_name", "pattern",
+            "base_weeks", "rs_rating", "vol_ratio", "rr", "entry", "stop",
             "disqualifiers"]
-    df = pd.DataFrame(rows)[: n]
+    df = pd.DataFrame(rows)[:n]
     avail = [c for c in cols if c in df.columns]
     if len(df):
         log.info("Top setups:\n%s", df[avail].to_string(index=False))
@@ -174,8 +206,7 @@ def _fetch_meta(symbols, max_workers=8):
             return sym, {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = [ex.submit(one, s) for s in symbols]
-        for f in as_completed(futs):
+        for f in as_completed([ex.submit(one, s) for s in symbols]):
             try:
                 sym, d = f.result()
                 if d:
