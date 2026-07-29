@@ -280,6 +280,40 @@ class TestMultiMarket:
         assert len(out) == n - 1
         assert 999.0 not in out["close"].values
 
+    def test_synthetic_holiday_bars_are_dropped(self):
+        """Non-US markets emit holidays as volume-0 bars with OHLC identical.
+        Leaving them in understates ATR and inflates the volume ratio."""
+        df = make_df(80)
+        i = df.index[40]
+        px = float(df.loc[i, "close"])
+        df.loc[i, ["open", "high", "low", "close"]] = px
+        df.loc[i, "volume"] = 0
+        out = marketdata.drop_synthetic_bars(df.copy())
+        assert len(out) == len(df) - 1
+
+    def test_real_zero_volume_bar_with_movement_is_kept(self):
+        """Only flat AND zero-volume bars are holidays; don't over-delete."""
+        df = make_df(80)
+        df.loc[df.index[40], "volume"] = 0          # price still moved
+        assert len(marketdata.drop_synthetic_bars(df.copy())) == len(df)
+
+    def test_synthetic_bars_understate_atr(self):
+        """Documents the damage the cleaner prevents."""
+        from screener.indicators import atr
+        df = make_df(120)
+        dirty = df.copy()
+        for k in range(-30, -1, 4):                 # inject holiday placeholders
+            i = dirty.index[k]
+            px = float(dirty.loc[i, "close"])
+            dirty.loc[i, ["open", "high", "low", "close"]] = px
+            dirty.loc[i, "volume"] = 0
+        clean = marketdata.drop_synthetic_bars(dirty.copy())
+        assert float(atr(clean, 14).iloc[-1]) > float(atr(dirty, 14).iloc[-1])
+
+    def test_psx_universe_is_broad_enough_to_be_useful(self):
+        from screener import markets as mk
+        assert len(mk.get("PK").universe) >= 60
+
     def test_trim_to_session_drops_future_bars(self):
         df = make_df(40)
         target = df["datetime"].iloc[-3].date()
