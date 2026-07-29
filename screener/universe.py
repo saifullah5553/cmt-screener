@@ -1,22 +1,27 @@
-"""Candidate universe construction across US (NYSE/NASDAQ/AMEX) and ASX.
+"""Candidate universe construction across every configured market.
 
-NOTE ON A GAP FOUND IN REVIEW: the previous code claimed ASX coverage but could
-never deliver it — `keep()` rejected any symbol containing a dot, and every ASX
-ticker on Yahoo is suffixed `.AX` (e.g. BHP.AX). ASX was therefore silently
-100% filtered out. Exchange handling is now explicit per market.
+Two discovery modes, chosen per market in `markets.py`:
+
+  1. SCREENER  - Yahoo returns the day's movers for the region (US, AU, IN,
+                 SA, KW, EG). Cheap and broad.
+  2. STATIC    - Yahoo's screener returns nothing for the region (PK, AE, QA),
+                 so a curated ticker list is scanned in full. Viable because a
+                 few hundred symbols download in seconds; the quality filters
+                 downstream are identical either way.
+
+Historical note: the original code claimed ASX support but rejected any symbol
+containing a dot — and every non-US Yahoo ticker is suffixed (.AX, .NS, .KA).
+Exchange handling is now explicit per market.
 """
 from __future__ import annotations
 
 import logging
 
+from . import markets as mk
+
 log = logging.getLogger(__name__)
 
-US_EXCHANGE_TOKENS = ("nasdaq", "nyse", "nms", "ngm", "ncm", "nyq", "ase",
-                      "american", "amex")
-# Yahoo exchange labels seen for ASX listings.
-ASX_EXCHANGE_TOKENS = ("asx", "australian")
-
-# Structures that are not single operating companies; we screen equities only.
+# Structures that are not single operating companies.
 EXCLUDE_TOKENS = ("arca", "cboe", "otc", "pink")
 
 
@@ -33,113 +38,117 @@ class Candidate:
         self.quote = quote or {}
 
     def __repr__(self):
-        return f"<{self.symbol} {self.market} {self.change_pct:.1f}%>"
+        return f"<{self.symbol} {self.market} {self.change_pct or 0:.1f}%>"
 
 
-def _passes_basic(sym, exch, price, chg, vol, market, cfg):
+def _num(x):
+    try:
+        return float(x) if x is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _acceptable(sym, exch, price, chg, vol, market: mk.Market, cfg) -> bool:
     if not sym:
         return False
     e = (exch or "").lower()
     if any(t in e for t in EXCLUDE_TOKENS):
         return False
-    if market == "US":
-        # US symbols are dot-free apart from class shares (BF.B) which Yahoo
-        # writes as BF-B; anything else with a dot is a foreign line.
+    if market.suffix:
+        if not sym.upper().endswith(market.suffix):
+            return False
+    else:
+        # US tickers carry no suffix; a dot means a foreign line.
         if "." in sym:
             return False
-        if e and not any(t in e for t in US_EXCHANGE_TOKENS):
-            return False
-    else:  # ASX
-        if not sym.upper().endswith(".AX"):
+        if e and not any(t in e for t in market.exchange_tokens):
             return False
     if price is None or price < cfg.min_price:
         return False
     if chg is not None and chg < cfg.min_change_pct:
         return False
-    if price and vol and price * vol < cfg.min_dollar_vol:
+    # Liquidity is market-relative: a floor set for US dollars would erase
+    # every PSX or EGX name. Applied later against local-currency turnover.
+    if price and vol and price * vol < cfg.min_turnover_for(market.code):
         return False
     return True
 
 
-def _collect(quotes, market, cfg, sink):
+def _collect(quotes, market: mk.Market, cfg, sink) -> int:
     kept = 0
     for q in quotes:
         sym = q.get("symbol")
+        price = _num(q.get("regularMarketPrice"))
+        chg = _num(q.get("regularMarketChangePercent"))
+        vol = _num(q.get("regularMarketVolume"))
         exch = q.get("fullExchangeName") or q.get("exchange")
-        price = q.get("regularMarketPrice")
-        chg = q.get("regularMarketChangePercent")
-        vol = q.get("regularMarketVolume")
-        try:
-            price = float(price) if price is not None else None
-            chg = float(chg) if chg is not None else None
-            vol = float(vol) if vol is not None else None
-        except (TypeError, ValueError):
-            continue
-        if _passes_basic(sym, exch, price, chg, vol, market, cfg):
-            sink[sym] = Candidate(sym, market, exch, price, chg, vol, q)
+        if _acceptable(sym, exch, price, chg, vol, market, cfg):
+            sink[sym] = Candidate(sym, market.code, exch, price, chg, vol, q)
             kept += 1
     return kept
 
 
-def fetch_us(cfg):
-    """US movers via the Yahoo predefined screener, with an EquityQuery fallback."""
+def _discover_by_screener(market: mk.Market, cfg) -> dict:
+    """Yahoo predefined/EquityQuery discovery for regions that support it."""
     import yfinance as yf
     found: dict[str, Candidate] = {}
     size = min(max(cfg.scan_limit * 3, 100), 250)
 
-    try:
-        res = yf.screen("day_gainers", count=size)
-        quotes = res.get("quotes", []) if isinstance(res, dict) else []
-        n = _collect(quotes, "US", cfg, found)
-        log.info("US day_gainers: %d raw -> %d kept", len(quotes), n)
-    except Exception as e:                               # noqa: BLE001
-        log.warning("US day_gainers failed: %s", e)
-
-    if not found:
+    # The US has a cleaner predefined screener than the generic region query.
+    if market.code == "US":
         try:
-            from yfinance import EquityQuery
-            q = EquityQuery("and", [
-                EquityQuery("gt", ["percentchange", cfg.min_change_pct]),
-                EquityQuery("gt", ["dayvolume", 200_000]),
-                EquityQuery("eq", ["region", "us"]),
-            ])
-            res = yf.screen(q, sortField="percentchange", sortAsc=False, size=size)
+            res = yf.screen("day_gainers", count=size)
             n = _collect(res.get("quotes", []) if isinstance(res, dict) else [],
-                         "US", cfg, found)
-            log.info("US EquityQuery fallback -> %d kept", n)
+                         market, cfg, found)
+            log.info("%s day_gainers -> %d kept", market.code, n)
         except Exception as e:                           # noqa: BLE001
-            log.warning("US EquityQuery fallback failed: %s", e)
-    return found
+            log.warning("%s day_gainers failed: %s", market.code, e)
+        if found:
+            return found
 
-
-def fetch_asx(cfg):
-    """ASX movers via EquityQuery region=au (the predefined screener is US-only)."""
-    import yfinance as yf
-    found: dict[str, Candidate] = {}
-    size = min(max(cfg.scan_limit * 2, 100), 250)
     try:
         from yfinance import EquityQuery
         q = EquityQuery("and", [
             EquityQuery("gt", ["percentchange", cfg.min_change_pct]),
-            EquityQuery("gt", ["dayvolume", 100_000]),
-            EquityQuery("eq", ["region", "au"]),
+            EquityQuery("gt", ["dayvolume", 50_000]),
+            EquityQuery("eq", ["region", market.region]),
         ])
         res = yf.screen(q, sortField="percentchange", sortAsc=False, size=size)
         quotes = res.get("quotes", []) if isinstance(res, dict) else []
-        n = _collect(quotes, "ASX", cfg, found)
-        log.info("ASX EquityQuery: %d raw -> %d kept", len(quotes), n)
+        n = _collect(quotes, market, cfg, found)
+        log.info("%s screener: %d raw -> %d kept", market.code, len(quotes), n)
     except Exception as e:                               # noqa: BLE001
-        log.warning("ASX screen failed (continuing US-only): %s", e)
+        log.warning("%s screener failed: %s", market.code, e)
     return found
 
 
-def build(cfg):
-    """Return the ranked candidate list across all enabled markets."""
-    found: dict[str, Candidate] = {}
-    if cfg.include_us:
-        found.update(fetch_us(cfg))
-    if cfg.include_asx:
-        found.update(fetch_asx(cfg))
+def _discover_static(market: mk.Market, cfg) -> dict:
+    """Scan a curated list in full — used where Yahoo offers no discovery.
 
-    ranked = sorted(found.values(), key=lambda c: (c.change_pct or 0), reverse=True)
-    return ranked[: cfg.scan_limit]
+    No quote filtering is applied here: without a screener we have no reliable
+    intraday change/volume, so every name is carried through and judged on its
+    daily history by the same quality gates as everything else.
+    """
+    found = {sym: Candidate(sym, market.code, market.name, None, None, None, {})
+             for sym in market.universe}
+    log.info("%s static universe: %d symbols", market.code, len(found))
+    return found
+
+
+def build(cfg) -> list[Candidate]:
+    """Assemble candidates for every enabled market."""
+    all_found: dict[str, Candidate] = {}
+    for market in mk.resolve(cfg.markets):
+        try:
+            found = (_discover_by_screener(market, cfg) if market.region
+                     else _discover_static(market, cfg))
+        except Exception as e:                           # noqa: BLE001
+            log.warning("%s discovery failed entirely: %s", market.code, e)
+            continue
+
+        # Cap movers per market so one hot tape cannot crowd out the others.
+        ranked = sorted(found.values(), key=lambda c: (c.change_pct or 0), reverse=True)
+        limit = cfg.scan_limit if market.region else len(ranked)
+        all_found.update({c.symbol: c for c in ranked[:limit]})
+
+    return list(all_found.values())

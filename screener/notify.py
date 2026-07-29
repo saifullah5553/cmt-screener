@@ -31,9 +31,15 @@ def _md(s):
     return str(s).replace("*", "").replace("_", "").replace("`", "").replace("[", "(")
 
 
-def format_header(session, regime, scanned, counts) -> str:
+def format_header(sessions, regime, scanned, counts) -> str:
+    """`sessions` maps market code -> the session analysed for that market."""
+    if isinstance(sessions, dict):
+        uniq = sorted({str(v) for v in sessions.values() if v})
+        when = uniq[-1] if len(uniq) == 1 else f"{uniq[0]} → {uniq[-1]}"
+    else:
+        when = str(sessions)
     return (
-        f"*Breakout Screen — {session}*\n"
+        f"*Breakout Screen — {when}*\n"
         f"*Market:* {_md(regime.get('label'))}"
         + (f" · VIX {regime['vix']:.1f}" if np.isfinite(_num(regime.get('vix'))) else "")
         + f"\n_Scanned {scanned} · {counts.get('A', 0)} A-grade, "
@@ -78,11 +84,11 @@ def format_watch(r) -> str:
     """One line per watchlist name — setup identified, trigger not yet given."""
     gap = abs(_num(r.get("ext_from_pivot_pct")) or 0)
     base = f"{r['base_weeks']}w {_md(r['pattern'])}" if r.get("base_weeks") else _md(r["pattern"])
-    return (f"   ◦ *{r['symbol']}* — {base} · pivot `{_n(r['pivot'])}` "
-            f"({gap:.1f}% away) · RS {_n(r['rs_rating'])}")
+    return (f"   ◦ *{r['symbol']}* ({r.get('market', '')}) — {base} · "
+            f"pivot `{_n(r['pivot'])}` ({gap:.1f}% away) · RS {_n(r['rs_rating'])}")
 
 
-def build_messages(session, regime, scanned, rows, cfg) -> list[str]:
+def build_messages(sessions, regime, scanned, rows, cfg) -> list[str]:
     counts = {}
     for r in rows:
         counts[r["grade"]] = counts.get(r["grade"], 0) + 1
@@ -91,16 +97,21 @@ def build_messages(session, regime, scanned, rows, cfg) -> list[str]:
                                                 else ("A",))][: cfg.max_alerts]
     watch = [r for r in rows if r["grade"] == "W"][: cfg.max_watch]
 
-    header = format_header(session, regime, scanned, counts)
+    header = format_header(sessions, regime, scanned, counts)
 
     msgs, cur = [], header
     if alerts:
-        for r in alerts:
-            block = "\n" + format_setup(r) + "\n"
+        # Group by market so the reader sees one tape at a time.
+        for code in dict.fromkeys(r.get("market", "US") for r in alerts):
+            block = f"\n*── {code} ──*\n"
             if len(cur) + len(block) > MAX_LEN:
-                msgs.append(cur)
-                cur = ""
+                msgs.append(cur); cur = ""
             cur += block
+            for r in [x for x in alerts if x.get("market", "US") == code]:
+                b = "\n" + format_setup(r) + "\n"
+                if len(cur) + len(b) > MAX_LEN:
+                    msgs.append(cur); cur = ""
+                cur += b
     else:
         cur += ("\n*No confirmed breakouts today.*\n"
                 "_Selectivity is the point — no forced trades._\n")

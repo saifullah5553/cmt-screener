@@ -31,7 +31,7 @@ OHLCV = ["open", "high", "low", "close", "volume"]
 
 # ------------------------------------------------------------------ download
 def download_ohlcv(symbols, period="2y", interval="1d", quotes=None,
-                   max_workers=8) -> dict[str, pd.DataFrame]:
+                   max_workers=8, allow_repair=None) -> dict[str, pd.DataFrame]:
     """Bulk-download daily OHLCV and return {symbol: tidy DataFrame}.
 
     `quotes` maps symbol -> live quote dict (from the screener) and is used to
@@ -73,7 +73,12 @@ def download_ohlcv(symbols, period="2y", interval="1d", quotes=None,
                 df = _tidy(sub)
                 if df is None:
                     continue
-                df = repair_last_bar(df, sym, (quotes or {}).get(sym))
+                # Repair is only safe when the symbol's market has CLOSED.
+                # For an open market a live quote is a mid-session price, not
+                # a close — patching it would fabricate a candle.
+                may_repair = True if allow_repair is None else bool(allow_repair(sym))
+                df = repair_last_bar(df, sym, (quotes or {}).get(sym),
+                                     allow_quote=may_repair)
                 if df is not None and len(df):
                     out[sym] = df
             except Exception as e:                      # noqa: BLE001
@@ -98,13 +103,19 @@ def _tidy(sub: pd.DataFrame) -> pd.DataFrame | None:
     return sub.sort_values("datetime").reset_index(drop=True)
 
 
-def repair_last_bar(df: pd.DataFrame, symbol: str, quote: dict | None) -> pd.DataFrame:
+def repair_last_bar(df: pd.DataFrame, symbol: str, quote: dict | None,
+                    allow_quote: bool = True) -> pd.DataFrame:
     """Fix or drop an unsettled final bar. THE core data-integrity guard.
 
     Yahoo may return the newest daily bar with a null close (and sometimes null
     OHL) for hours after the close. We patch `close` from the live quote when
     the quote clearly refers to that same bar; otherwise we drop the bar so we
     analyse only fully-formed candles.
+
+    `allow_quote=False` must be passed when the symbol's market is still OPEN:
+    the quote would then be an intraday price, and writing it in as a close
+    manufactures a candle that never existed. In that case the partial bar is
+    dropped and we fall back to the previous, genuinely completed session.
     """
     if df.empty:
         return df
@@ -113,6 +124,10 @@ def repair_last_bar(df: pd.DataFrame, symbol: str, quote: dict | None) -> pd.Dat
     if pd.notna(last["close"]):
         df = df.dropna(subset=["close"]).reset_index(drop=True)
         return df
+
+    if not allow_quote:
+        log.debug("%s: market open — dropping partial bar instead of repairing", symbol)
+        return df.iloc[:-1].dropna(subset=["close"]).reset_index(drop=True)
 
     px = None
     if quote:
@@ -175,6 +190,20 @@ def validate(df: pd.DataFrame, min_bars: int) -> tuple[bool, str]:
     if df["close"].iloc[-10:].nunique() == 1:
         return False, "stale/flat feed"
     return True, "ok"
+
+
+def trim_to_session(df: pd.DataFrame, session_date) -> pd.DataFrame:
+    """Drop any bars dated AFTER the session we intend to analyse.
+
+    Needed because an open market can return today's in-progress bar with a
+    populated (intraday) close, which looks perfectly valid but is not a
+    completed candle. Trimming guarantees the last row is always the last
+    fully-closed session for that market.
+    """
+    if df is None or df.empty or session_date is None:
+        return df
+    keep = df["datetime"].dt.date <= session_date
+    return df.loc[keep].reset_index(drop=True)
 
 
 def freshness(df: pd.DataFrame, expected_session) -> int:

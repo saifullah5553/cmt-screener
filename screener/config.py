@@ -31,17 +31,28 @@ class Config:
     telegram_chat:  str | None = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID"))
 
     # ---- universe ------------------------------------------------------
+    # Which markets to scan. "ALL" = every market in the registry.
+    markets:      list = field(default_factory=lambda: _list("MARKETS", "ALL"))
     # Number of raw movers pulled per market before quality filtering.
     scan_limit:   int  = field(default_factory=lambda: _i("SCREENER_LIMIT", 120))
-    include_asx:  bool = field(default_factory=lambda: _b("INCLUDE_ASX", "true"))
-    include_us:   bool = field(default_factory=lambda: _b("INCLUDE_US", "true"))
 
     # ---- liquidity / tradability gates ---------------------------------
     min_price:        float = field(default_factory=lambda: _f("MIN_PRICE", 5))
     min_dollar_vol:   float = field(default_factory=lambda: _f("MIN_DOLLAR_VOL", 10_000_000))
-    min_avg_dollar_vol: float = field(default_factory=lambda: _f("MIN_AVG_DOLLAR_VOL", 5_000_000))
     min_change_pct:   float = field(default_factory=lambda: _f("MIN_CHANGE_PCT", 1.5))
     min_bars:         int   = field(default_factory=lambda: _i("MIN_BARS", 150))
+
+    # Turnover floors are expressed in LOCAL currency, because a USD-sized
+    # floor would erase every PSX, EGX or Qatari name outright. These are
+    # rough "an institution can actually get filled" levels per market.
+    turnover_floors: dict = field(default_factory=lambda: {
+        "US": 10_000_000, "AU": 2_000_000, "IN": 50_000_000,
+        "PK": 20_000_000, "SA": 5_000_000, "KW": 200_000,
+        "EG": 5_000_000, "AE": 2_000_000, "QA": 2_000_000,
+    })
+
+    def min_turnover_for(self, market_code: str) -> float:
+        return float(self.turnover_floors.get(market_code, self.min_dollar_vol))
 
     # ---- breakout quality ----------------------------------------------
     # Close must land in the upper part of the day's range (no heavy upper wick).

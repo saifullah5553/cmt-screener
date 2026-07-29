@@ -1,15 +1,25 @@
 name: CMT Breakout Screener
 
-# Runs every morning at 05:15 UTC = 09:15 Dubai time (GMT+4), every day.
-# At that hour the US market is already closed (00:15-01:15 ET) and the next
-# session hasn't opened, so the script analyzes YESTERDAY's completed US
-# session (see resolve_session() in cmt_screener.py). It self-skips on days
-# with nothing new (weekends / holidays), so a daily cron is safe and keeps
-# the repo active for the heartbeat. GitHub cron is always UTC (no DST); Dubai
-# has no DST either, so 05:15 UTC == 09:15 Dubai year-round.
+# Runs daily at 13:00 UTC = 17:00 Dubai (GMT+4).
+#
+# Every covered market is closed at this moment, year-round through both DST
+# regimes. Measured all-closed windows: 12:30-14:00 UTC in January and
+# 12:00-13:00 UTC in July — 13:00 is the latest slot inside both.
+#
+#   Closed by then (same-day sessions):
+#     KW 09:30 · NSE/BSE 10:00 · QA 10:15 · PSX 10:30 · AE 11:00
+#     SA 12:00 · EG 12:30 UTC · ASX closed 05:00-06:00 UTC
+#   US NYSE/NASDAQ has NOT yet opened (13:30 UTC EDT / 14:30 UTC EST),
+#     so the US reports YESTERDAY's completed session — intended.
+#
+# Each market resolves its own last COMPLETED session (screener/markets.py),
+# so nothing is ever analysed mid-trade. If GitHub fires the job late and the
+# US has opened, the US simply falls back to the same previous close.
+#
+# GitHub cron is always UTC and observes no DST; Dubai has no DST either.
 on:
   schedule:
-    - cron: '15 5 * * *'
+    - cron: '0 13 * * *'
   workflow_dispatch:        # manual "Run workflow" button in the Actions tab
     inputs:
       force_run:
@@ -47,9 +57,10 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           # --- universe --------------------------------------------------
-          SCREENER_LIMIT:     '120'   # movers examined per session
-          INCLUDE_US:         'true'  # NYSE / NASDAQ / AMEX
-          INCLUDE_ASX:        'true'  # Australian Securities Exchange
+          # US=NYSE/NASDAQ  AU=ASX  IN=NSE/BSE  PK=PSX  SA=Tadawul
+          # KW=Kuwait  EG=EGX  AE=DFM/ADX  QA=Qatar   ("ALL" = every market)
+          MARKETS:            'ALL'
+          SCREENER_LIMIT:     '80'    # movers examined per discovered market
           # --- liquidity (institutions cannot trade illiquid names) -------
           MIN_PRICE:          '5'
           MIN_DOLLAR_VOL:     '10000000'
