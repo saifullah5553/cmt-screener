@@ -1,14 +1,15 @@
 name: CMT Breakout Screener
 
-# Runs every weekday at 21:30 UTC = after the 4:00pm ET US close year-round
-#   * EDT (summer): 21:30 UTC = 17:30 ET
-#   * EST (winter): 21:30 UTC = 16:30 ET
-# GitHub cron is always UTC and does NOT observe daylight saving, so a fixed
-# UTC time is intentional. The script skips US market holidays itself; the
-# 1-5 (Mon-Fri) filter excludes weekends.
+# Runs every morning at 05:15 UTC = 09:15 Dubai time (GMT+4), every day.
+# At that hour the US market is already closed (00:15-01:15 ET) and the next
+# session hasn't opened, so the script analyzes YESTERDAY's completed US
+# session (see resolve_session() in cmt_screener.py). It self-skips on days
+# with nothing new (weekends / holidays), so a daily cron is safe and keeps
+# the repo active for the heartbeat. GitHub cron is always UTC (no DST); Dubai
+# has no DST either, so 05:15 UTC == 09:15 Dubai year-round.
 on:
   schedule:
-    - cron: '30 21 * * 1-5'
+    - cron: '15 5 * * *'
   workflow_dispatch:        # manual "Run workflow" button in the Actions tab
     inputs:
       force_run:
