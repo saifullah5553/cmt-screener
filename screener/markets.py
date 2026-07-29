@@ -102,17 +102,45 @@ MARKETS: dict[str, Market] = {
         exchange_tokens=("nse", "bse"), currency="INR"),
 
     # Yahoo's screener returns nothing for Pakistan, so the universe is static.
-    # Verified live: 24/25 of these return usable daily history.
+    # Every ticker below was verified to return >=200 usable daily bars AND at
+    # least 20m PKR of average daily turnover. Names that look obvious but do
+    # NOT work on Yahoo: ENGRO, FFBL, THALL, COLG, NESTLE, BWCL, AGL, PSEL.
     "PK": Market(
         code="PK", name="Pakistan Stock Exchange", tz="Asia/Karachi",
         open_t=time(9, 30), close_t=time(15, 30), weekend=MON_FRI,
         suffix=".KA", benchmark=None, region=None,
         exchange_tokens=("karachi", "pakistan"), currency="PKR",
         universe=(
+            # large caps / index heavyweights
             "OGDC.KA", "HBL.KA", "LUCK.KA", "PPL.KA", "MCB.KA", "UBL.KA",
             "FFC.KA", "PSO.KA", "MARI.KA", "MEBL.KA", "BAHL.KA", "NBP.KA",
             "HUBC.KA", "DGKC.KA", "EFERT.KA", "POL.KA", "SYS.KA", "TRG.KA",
             "INDU.KA", "SEARL.KA", "AKBL.KA", "CHCC.KA", "KAPCO.KA", "NML.KA",
+            # banks & financials
+            "BOP.KA", "FABL.KA", "SNBL.KA", "JSBL.KA",
+            # energy & refining
+            "ATRL.KA", "NRL.KA", "SNGP.KA", "SSGC.KA", "APL.KA",
+            # cement & construction
+            "MLCF.KA", "FCCL.KA", "PIOC.KA", "KOHC.KA", "ACPL.KA",
+            # chemicals & fertiliser
+            "LOTCHEM.KA", "FATIMA.KA", "EPCL.KA", "ICI.KA", "AGP.KA",
+            # steel & engineering
+            "MUGHAL.KA", "ASTL.KA", "ISL.KA", "GHNI.KA", "GHGL.KA", "TGL.KA",
+            # technology & telecom
+            "NETSOL.KA", "AVN.KA", "PTC.KA", "WTL.KA", "OCTOPUS.KA", "AIRLINK.KA",
+            # pharma & healthcare
+            "GLAXO.KA", "HINOON.KA", "ABOT.KA", "SHFA.KA", "BIFO.KA",
+            # textiles, autos & other
+            "ILP.KA", "GATM.KA", "PAEL.KA", "TPLP.KA", "PACE.KA", "UNITY.KA",
+            # autos & engineering
+            "MTL.KA", "HCAR.KA", "SAZEW.KA", "GHNL.KA", "GTYR.KA", "AGTL.KA",
+            # power & utilities
+            "POWER.KA", "NPL.KA", "NCPL.KA", "KEL.KA",
+            # insurance & investment
+            "AICL.KA", "IGIHL.KA", "JSCL.KA", "BIPL.KA", "NICL.KA", "DAWH.KA",
+            # consumer, textiles & mid-caps
+            "PREMA.KA", "SRVI.KA", "TREET.KA", "IBLHL.KA", "NCL.KA",
+            "KOSM.KA", "MSOT.KA", "ASC.KA",
         )),
 
     "SA": Market(

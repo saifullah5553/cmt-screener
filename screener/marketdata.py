@@ -100,7 +100,35 @@ def _tidy(sub: pd.DataFrame) -> pd.DataFrame | None:
     sub["datetime"] = pd.to_datetime(sub["datetime"]).dt.tz_localize(None).dt.normalize()
     for c in OHLCV:
         sub[c] = pd.to_numeric(sub[c], errors="coerce")
+    sub = drop_synthetic_bars(sub)
     return sub.sort_values("datetime").reset_index(drop=True)
+
+
+def drop_synthetic_bars(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove exchange-holiday placeholder bars.
+
+    On markets outside the US/AU, Yahoo emits holidays as fabricated candles:
+    volume 0 with open == high == low == close (the previous close carried
+    forward). No session took place, so these are not candles at all.
+
+    Leaving them in does real damage, all of it silent:
+      * true range is 0 on those bars, so ATR is understated - measured up to
+        18.6% on QNBK.QA - which makes stops too tight and inflates R:R;
+      * they drag the average-volume baseline down, inflating the breakout
+        volume ratio (~1.14x on PSX names) so weak volume can pass the gate;
+      * a run of identical bars mimics volatility contraction, which flatters
+        VCP and range-based pattern detection.
+
+    Prevalence measured over one year: US 0.0%, AU 0.0%, IN 1.6%, SA 2.7%,
+    QA 3.1%, KW 3.2%, PK 4.7-5.1%, AE 4.8%, EG 4.8%.
+    """
+    if df is None or df.empty:
+        return df
+    flat = (df["open"] == df["high"]) & (df["high"] == df["low"]) & (df["low"] == df["close"])
+    synthetic = flat & (df["volume"].fillna(0) == 0)
+    if synthetic.any():
+        df = df.loc[~synthetic]
+    return df
 
 
 def repair_last_bar(df: pd.DataFrame, symbol: str, quote: dict | None,
