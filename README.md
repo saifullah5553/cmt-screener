@@ -1,97 +1,121 @@
-# Automated CMT Breakout Screener
+# Global CMT Breakout Screener
 
-A fully autonomous daily stock screener that runs on **GitHub Actions** — no server, no cost, no human intervention. Every US market trading day, after the close, it:
+An autonomous daily breakout screener running on **GitHub Actions** — no server, no cost, no intervention. Once a day it scans nine markets, analyses only completed daily candles, and pushes a technician's read of the qualifying setups to Telegram.
 
-1. **Checks the calendar** — exits immediately on weekends and NYSE/NASDAQ holidays (and half-days), using the official exchange calendar with a built-in pure-Python fallback. You never maintain a holiday list.
-2. **Finds candidates** — pulls the day's top gainers (positive movers) from Yahoo Finance via `yfinance`. No Barchart, no login.
-3. **Downloads data** — one year of daily OHLCV for each candidate (plus SPY as a benchmark), in a single bulk request.
-4. **Analyzes like a CMT** — multi-factor, confluence-based technical scoring (trend structure, ADX, Bollinger squeeze/%B, volume expansion + OBV, RSI with divergence, MACD, ATR-based stops, measured-move targets, relative strength) and grades each name **A / B / C**.
-5. **Alerts you** — pushes the confirmed setups to Telegram and saves a full sorted CSV.
+The methodology is deliberately narrow: **price, trend, volume, relative strength, support and resistance**. Nothing else. The objective is 5–20 high-quality names, not a long tail of marginal signals.
 
-> **Not investment advice.** Every level is a mechanical derivation from historical price/volume data, meant to support your own decisions.
+> **Not investment advice.** Every level is a mechanical derivation from historical price and volume.
 
 ---
 
-## What each file does
+## Markets covered
 
-| File | Purpose |
-|---|---|
-| `cmt_screener.py` | The whole pipeline: gate → candidates → data → analysis → alert. |
-| `nyse_cal.py` | Zero-dependency NYSE holiday calendar (fallback for the gate). |
-| `.github/workflows/screener.yml` | The GitHub Actions schedule + run definition. |
-| `requirements.txt` | Python dependencies. |
+| Code | Market | Discovery | Benchmark |
+|---|---|---|---|
+| `US` | NYSE / NASDAQ / AMEX | Yahoo screener | SPY |
+| `AU` | ASX | Yahoo screener | `^AXJO` |
+| `IN` | NSE / BSE India | Yahoo screener | `^NSEI` |
+| `PK` | Pakistan Stock Exchange | static universe (90 names) | cohort |
+| `SA` | Saudi Tadawul | Yahoo screener | `^TASI.SR` |
+| `KW` | Boursa Kuwait | Yahoo screener | cohort |
+| `EG` | EGX Egypt | Yahoo screener | cohort |
+| `AE` | DFM / ADX (UAE) | static universe | cohort |
+| `QA` | Qatar Exchange | static universe | cohort |
+
+Yahoo's screener returns no candidates for Pakistan, UAE and Qatar, so those use curated ticker lists — every symbol verified for usable history and real turnover. "Cohort" means relative strength is ranked within that market rather than against an index, because no usable index ticker exists.
+
+Oman and Bahrain are **not** covered — Yahoo has no usable data for them.
 
 ---
 
-## One-time setup (about 15 minutes)
+## Schedule
 
-### 1. Create the repository
-Create a new **private** GitHub repo and add these files (keep the folder layout, including `.github/workflows/screener.yml`). Either upload them in the web UI or:
+Runs daily at **13:00 UTC = 17:00 Dubai** (`cron: '0 13 * * *'`).
 
-```bash
-git init
-git add .
-git commit -m "CMT breakout screener"
-git branch -M main
-git remote add origin https://github.com/<you>/<repo>.git
-git push -u origin main
+This is inside the only window where **every** market is closed, year-round through both DST regimes (measured: 12:30–14:00 UTC in January, 12:00–13:00 UTC in July). Consequently:
+
+- Asia and Gulf markets report **that day's** completed session.
+- The US has not opened yet (13:30 UTC EDT / 14:30 UTC EST), so it reports **yesterday's** session — intended.
+
+Each market resolves its own last completed session independently, so nothing is ever analysed mid-trade even if GitHub fires the job late.
+
+---
+
+## What it looks for
+
+1. **Trend** — Dow structure (higher highs *and* higher lows), price above rising 50/200-day averages, weekly confirmation.
+2. **Stage** — Weinstein stage analysis on the weekly 30-week MA. Stage 3 (topping) and Stage 4 (declining) are rejected outright. This is the single highest-value filter.
+3. **Base** — five structures only: VCP, Flat Base, Rectangle, Ascending Triangle, Cup & Handle. Each yields an objective pivot.
+4. **Breakout** — a close above that pivot, in the upper part of the day's range, not extended beyond it.
+5. **Volume** — contraction through the base, expansion on the break, plus accumulation vs distribution day counts.
+6. **Relative strength** — a 0–100 rating from weighted 3/6/9/12-month benchmark-relative performance, percentile-ranked within its own market.
+7. **Market context** — index trend, VIX and breadth set screening strictness automatically.
+8. **Risk** — entry, stop, two targets and reward:risk, all derived from chart levels.
+
+Score = Trend 25 · Base 25 · Volume 20 · Relative Strength 20 · Market 10. Risk is a **gate**, not a score — poor reward:risk cannot be averaged away.
+
+Grades: **A** (confirmed), **B** (constructive), **W** (set up, awaiting the pivot trigger), **C** (rejected, with reasons).
+
+Deliberately **not** used: RSI, MACD, Bollinger, Keltner, TTM squeeze, NR7/NR10, CMF, anchored VWAP, regression slope. See [REVIEW.md](REVIEW.md) for why each was removed.
+
+---
+
+## Layout
+
+```
+cmt_screener.py          entry point
+screener/
+  config.py              env-driven configuration
+  markets.py             per-market registry: hours, timezone, sessions, universe
+  sessions.py            US trading-day helpers
+  universe.py            candidate discovery (screener + static)
+  marketdata.py          download, repair, validate, weekly/monthly resample
+  indicators.py          minimal indicator set
+  patterns.py            the five base structures
+  stage.py               Weinstein stage analysis
+  strength.py            relative-strength rating + sector leadership
+  regime.py              market context
+  analysis.py            gates, weighted scoring, written observation
+  notify.py              Telegram formatting and transport
+  pipeline.py            orchestration
+tests/test_screener.py   46 tests
 ```
 
-Scheduled workflows only run from the **default branch** (`main`), so make sure the files are there.
-
-### 2. Create a Telegram bot (for alerts)
-1. In Telegram, message **@BotFather** → `/newbot` → follow prompts. It gives you a **bot token** like `123456789:AAE...`.
-2. Send your new bot any message (e.g. "hi") so it's allowed to message you.
-3. Get your **chat ID**: open `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser and read `result[].message.chat.id`. (Or message **@userinfobot**, which replies with your ID.)
-
-*(To alert a group instead: add the bot to the group, send a message there, and read the negative group chat ID from `getUpdates`.)*
-
-### 3. Add GitHub secrets
-In the repo: **Settings → Secrets and variables → Actions → New repository secret**. Add:
-
-| Secret name | Value |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | the BotFather token |
-| `TELEGRAM_CHAT_ID` | your chat ID |
-
-*(Skip these to run in "CSV-only" mode — the job still runs and uploads the results file as a build artifact.)*
-
-### 4. Enable and test
-1. Open the **Actions** tab and enable workflows if prompted.
-2. Click **CMT Breakout Screener → Run workflow**. Set **force_run = true** to bypass the trading-day gate so you can test on a weekend/holiday.
-3. Watch the run log. On success you'll get a Telegram message and a `screener-results` artifact (the CSV) attached to the run.
-
-That's it — from then on it runs itself every trading day at 21:30 UTC.
-
 ---
 
-## Scheduling notes
+## Setup
 
-- **Time:** `21:30 UTC` weekdays = **after** the 4:00pm ET close year-round (17:30 ET in summer, 16:30 ET in winter). GitHub cron is UTC and does **not** observe daylight saving, so a fixed UTC time is intentional. To run at a different time, edit the `cron:` line in `screener.yml` ([crontab.guru](https://crontab.guru) helps).
-- **Weekends** are excluded by the `1-5` (Mon–Fri) day-of-week filter; **holidays** are handled inside the script.
-- **GitHub delays:** scheduled runs can start a few minutes late under load — harmless here since the daily bar is already final.
-- **60-day inactivity:** GitHub disables scheduled workflows in repos with no activity for 60 days. Any push re-enables it; the monthly artifact/commit activity from normal use usually keeps it alive, or add a tiny periodic commit if the repo goes idle.
+1. **Telegram** — message `@BotFather` → `/newbot` for a token; get your chat ID from `@userinfobot`.
+2. **Secrets** — repo **Settings → Secrets and variables → Actions**: add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. Without them the run still completes and uploads the CSV artifact.
+3. **Test** — **Actions → Global CMT Breakout Screener → Run workflow**, `force_run = true`.
 
-## Tuning (edit the `env:` block in `screener.yml`)
+## Tuning
+
+All thresholds are `env:` entries in [.github/workflows/screener.yml](.github/workflows/screener.yml) — no code edit needed.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SCREENER_LIMIT` | `50` | Max gainers to analyze per day. |
-| `MIN_PRICE` | `5` | Skip names under this price. |
-| `MIN_CHANGE_PCT` | `2.0` | Candidate must be up at least this % on the day. |
-| `MIN_DOLLAR_VOL` | `5000000` | Liquidity floor (price × volume). |
-| `INCLUDE_GRADE_B` | `true` | Also send constructive (B) setups, not just A. |
-| `MIN_RR` | `2.0` | Reward:risk below this is flagged lower-quality. |
+| `MARKETS` | `ALL` | Markets to scan, e.g. `US,IN,PK` |
+| `SCREENER_LIMIT` | `80` | Movers examined per discovered market |
+| `MIN_VOL_RATIO` | `1.4` | Volume expansion vs the 50-day average |
+| `MIN_RS_RATING` | `70` | Minimum relative-strength rating |
+| `MIN_CLOSE_RANGE_POS` | `0.55` | Close must land in the upper part of the range |
+| `MAX_EXT_FROM_PIVOT` | `8.0` | Don't chase extended breakouts (%) |
+| `MIN_RR` | `2.0` | Minimum reward:risk |
+| `MIN_SCORE` | `70` | Composite score floor |
+| `WATCH_ENABLED` | `true` | Report names approaching their pivot |
 
-## About the data source
-
-`yfinance` scrapes Yahoo Finance and occasionally rate-limits datacenter IPs. This screener keeps its footprint tiny (one screener call + one bulk download per day), which avoids the problem in practice. If Yahoo ever returns nothing, the run exits cleanly and tells you rather than sending bad data. A paid, more robust alternative (e.g. reinstating the Twelve Data pull for OHLCV) can be swapped into `get_ohlcv()` if you outgrow the free tier.
-
-## Local test (optional)
+## Local run
 
 ```bash
 pip install -r requirements.txt
-FORCE_RUN=true python cmt_screener.py      # runs today regardless of the calendar
+python -m pytest tests/ -q
+FORCE_RUN=true MARKETS=US python cmt_screener.py
 ```
 
-Set `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` in your shell to test alerts locally.
+## Data notes
+
+`yfinance` is the sole source. Two quirks are handled explicitly, both of which silently corrupted results before being fixed:
+
+- **Unsettled bars** — Yahoo publishes the newest daily bar with `close = NaN` for hours after a close. `dropna(how="all")` does not remove a partially-null row, so price became `NaN`, every comparison returned `False`, and *every* stock graded C. Repaired from the quote endpoint — but never for a market that is still open, where a live quote is not a close.
+- **Fabricated holidays** — non-US exchanges report holidays as volume-0 bars with all four prices equal. These understate ATR (up to +18.6%), inflate the volume ratio (~1.14×) and mimic volatility contraction. They are stripped on load.
