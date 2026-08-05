@@ -494,3 +494,45 @@ class TestResampling:
     def test_weekly_volume_is_summed(self):
         df = make_df(60)
         assert marketdata.to_weekly(df)["volume"].sum() == pytest.approx(df["volume"].sum())
+
+
+# --------------------------------------------------------------- CI gate
+class TestGateCheckScript:
+    """gatecheck.py runs before `pip install`, so it must stay stdlib-only and
+    must never fail the job — that is what makes frequent wake-ups affordable."""
+
+    def test_gatecheck_imports_no_heavy_dependencies(self):
+        import subprocess, sys as _s
+        code = (
+            "import sys;"
+            "before=set(sys.modules);"
+            "import gatecheck;"
+            "heavy=[m for m in set(sys.modules)-before "
+            "if m.split('.')[0] in ('pandas','numpy','yfinance','requests')];"
+            "print(','.join(heavy))"
+        )
+        r = subprocess.run([_s.executable, "-c", code], capture_output=True,
+                           text=True, cwd=os.path.dirname(os.path.dirname(
+                               os.path.abspath(__file__))))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "", f"heavy imports: {r.stdout}"
+
+    def test_gatecheck_survives_unwritable_output(self, tmp_path, monkeypatch):
+        import subprocess, sys as _s
+        env = dict(os.environ, GITHUB_OUTPUT=str(tmp_path / "no" / "such" / "f"),
+                   FORCE_RUN="true", MARKETS="ALL")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        r = subprocess.run([_s.executable, "gatecheck.py"], capture_output=True,
+                           text=True, cwd=root, env=env)
+        assert r.returncode == 0
+
+    def test_gatecheck_writes_proceed_flag(self, tmp_path):
+        import subprocess, sys as _s
+        out = tmp_path / "out.txt"
+        env = dict(os.environ, GITHUB_OUTPUT=str(out), FORCE_RUN="true",
+                   MARKETS="ALL")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        r = subprocess.run([_s.executable, "gatecheck.py"], capture_output=True,
+                           text=True, cwd=root, env=env)
+        assert r.returncode == 0
+        assert "proceed=true" in out.read_text()
