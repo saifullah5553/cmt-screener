@@ -57,15 +57,30 @@ def write_state(signature: str, now_utc: datetime | None = None) -> None:
         log.warning("could not persist run state: %s", e)
 
 
+def _target_minutes(cfg) -> int:
+    """Configured earliest delivery time, as minutes past midnight UTC."""
+    try:
+        hh, mm = str(cfg.run_not_before_utc).split(":")
+        return int(hh) * 60 + int(mm)
+    except (ValueError, AttributeError):
+        return 13 * 60
+
+
 def should_run(cfg, now_utc: datetime | None = None) -> tuple[bool, str, str]:
     """Return (proceed, signature, reason).
 
-    Dedup is keyed on the UTC DATE, not on the session set. There are two
-    all-closed windows in a UTC day — around 12:00-13:00 UTC (the US has not
-    opened, so it reports yesterday) and again after the US close from roughly
-    20:00 UTC (the US reports today). Those are different session sets, so
-    keying on sessions alone would alert twice daily. One alert per UTC day,
-    earliest suitable window wins, which lands in the Dubai late afternoon.
+    Order of checks:
+      1. Every covered market must be closed (no partial candles).
+      2. Not before the configured target time (default 13:00 UTC = 17:00
+         Dubai), so the alert does not arrive at 04:00 Dubai just because an
+         earlier all-closed window existed.
+      3. Not already alerted this UTC day.
+
+    Dedup is keyed on the UTC DATE, not the session set: a UTC day holds two
+    all-closed windows — around 12:00-13:00 UTC (US not yet open, so it
+    reports yesterday) and again after the US close from roughly 20:00 UTC
+    (US reports today). Those carry different session sets, so keying on
+    sessions alone would alert twice a day.
     """
     now_utc = now_utc or datetime.now(ZoneInfo("UTC"))
     signature = mk.session_signature(cfg.markets, now_utc)
@@ -73,16 +88,19 @@ def should_run(cfg, now_utc: datetime | None = None) -> tuple[bool, str, str]:
     if cfg.force_run:
         return True, signature, "forced"
 
+    state = _read_state()
+    if state.get("last_alert_utc_date") == now_utc.strftime("%Y-%m-%d"):
+        return False, signature, "already alerted today"
+
     still_open = mk.open_markets(cfg.markets, now_utc)
     if still_open:
         return (False, signature,
                 f"{', '.join(still_open)} still trading — waiting for the "
                 f"all-closed window so every market has a completed candle")
 
-    state = _read_state()
-    if state.get("last_alert_utc_date") == now_utc.strftime("%Y-%m-%d"):
-        return False, signature, "already alerted today"
-    if state.get("last_signature") == signature:
-        return False, signature, "these sessions have already been alerted"
+    minutes = now_utc.hour * 60 + now_utc.minute
+    if minutes < _target_minutes(cfg):
+        return (False, signature,
+                f"before target delivery time {cfg.run_not_before_utc} UTC")
 
-    return True, signature, "all markets closed; sessions not yet reported"
+    return True, signature, "all markets closed; at/after target time"

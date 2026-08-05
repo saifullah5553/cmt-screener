@@ -5,6 +5,7 @@ for every symbol — it must never regress.
 """
 from datetime import date, datetime
 
+import os
 import numpy as np
 import pandas as pd
 import pytest
@@ -380,7 +381,7 @@ class TestRunGate:
         guard the user would be alerted twice every day."""
         rg = self._isolate(tmp_path, monkeypatch)
         cfg = self._cfg(tmp_path, markets=["US", "IN"])
-        midday = self._at(12, 30)
+        midday = self._at(13, 0)          # the target delivery time
         ok, sig, _ = rg.should_run(cfg, midday)
         assert ok is True
         rg.write_state(sig, midday)
@@ -394,6 +395,46 @@ class TestRunGate:
         cfg.force_run = True
         ok, _, reason = rg.should_run(cfg, self._at(18, 21))   # mid-US-session
         assert ok is True and reason == "forced"
+
+    def test_sends_at_1300_utc_1700_dubai(self, tmp_path, monkeypatch):
+        """The requested delivery time, verified in BOTH DST regimes."""
+        from screener import markets as mk
+        rg = self._isolate(tmp_path, monkeypatch)
+        for mo, dy in ((8, 5), (1, 14)):
+            if os.path.exists(rg.STATE_FILE):
+                os.remove(rg.STATE_FILE)
+            cfg = self._cfg(tmp_path, markets=["ALL"])
+            t = datetime(2026, mo, dy, 13, 0, tzinfo=self.UTC)
+            assert mk.open_markets(["ALL"], t) == []          # all shut
+            ok, _, _ = rg.should_run(cfg, t)
+            assert ok is True, f"month {mo} did not send at 13:00 UTC"
+
+    def test_does_not_send_early_at_1200_utc(self, tmp_path, monkeypatch):
+        """An earlier all-closed window must not pull delivery forward."""
+        rg = self._isolate(tmp_path, monkeypatch)
+        cfg = self._cfg(tmp_path, markets=["ALL"])
+        ok, _, reason = rg.should_run(cfg, self._at(12, 0))
+        assert ok is False and "target" in reason
+
+    def test_does_not_send_in_the_middle_of_the_night(self, tmp_path, monkeypatch):
+        """Guards against alerting in the 20:00-23:00 UTC window (00:00-03:00
+        Dubai) when the target window was already served."""
+        rg = self._isolate(tmp_path, monkeypatch)
+        cfg = self._cfg(tmp_path, markets=["ALL"])
+        t = self._at(13, 0)
+        ok, sig, _ = rg.should_run(cfg, t)
+        assert ok is True
+        rg.write_state(sig, t)
+        ok2, _, reason = rg.should_run(cfg, self._at(21, 0))
+        assert ok2 is False and "today" in reason
+
+    def test_late_firing_still_delivers_same_day(self, tmp_path, monkeypatch):
+        """If GitHub misses 13:00 entirely, a later all-closed wake-up still
+        sends rather than skipping the day."""
+        rg = self._isolate(tmp_path, monkeypatch)
+        cfg = self._cfg(tmp_path, markets=["ALL"])
+        ok, _, _ = rg.should_run(cfg, self._at(21, 0))
+        assert ok is True
 
     def test_signature_captures_every_market_session(self, tmp_path):
         from screener import markets as mk

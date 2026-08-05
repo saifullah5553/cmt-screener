@@ -16,6 +16,7 @@ def _env(key, default=None):
     return v if v not in (None, "") else default
 
 
+def _s(key, default):      return str(_env(key, default)).strip()
 def _f(key, default):      return float(_env(key, default))
 def _i(key, default):      return int(float(_env(key, default)))
 def _b(key, default):      return str(_env(key, default)).strip().lower() in ("1", "true", "yes", "y")
@@ -29,6 +30,16 @@ class Config:
     # ---- notifications -------------------------------------------------
     telegram_token: str | None = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN"))
     telegram_chat:  str | None = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID"))
+
+    # ---- delivery timing -------------------------------------------------
+    # Target alert time, expressed in UTC. The workflow wakes hourly and the
+    # run gate refuses to fire before this, so the alert lands at the first
+    # wake-up at or after it (13:00 UTC = 17:00 Dubai). GitHub's scheduler is
+    # not punctual, so this is a floor, not a guarantee — see rungate.py.
+    run_not_before_utc: str = field(default_factory=lambda: _s("RUN_NOT_BEFORE_UTC", "13:00"))
+    # If the target window is missed entirely (GitHub can be hours late), still
+    # send once the next all-closed window arrives rather than skipping a day.
+    allow_late_fallback: bool = field(default_factory=lambda: _b("ALLOW_LATE_FALLBACK", "true"))
 
     # ---- universe ------------------------------------------------------
     # Which markets to scan. "ALL" = every market in the registry.
