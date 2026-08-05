@@ -63,6 +63,12 @@ jobs:
           # KW=Kuwait  EG=EGX  AE=DFM/ADX  QA=Qatar   ("ALL" = every market)
           MARKETS:            'ALL'
           SCREENER_LIMIT:     '80'    # movers examined per discovered market
+          # --- delivery timing -------------------------------------------
+          # 13:00 UTC = 17:00 Dubai. Every market (US, ASX, India, Pakistan,
+          # Tadawul, Kuwait, Egypt, UAE, Qatar) is closed by then, verified in
+          # both DST regimes. The gate will not fire before this.
+          RUN_NOT_BEFORE_UTC: '13:00'
+          ALLOW_LATE_FALLBACK: 'true'  # still send if GitHub misses the window
           # --- liquidity (institutions cannot trade illiquid names) -------
           MIN_PRICE:          '5'
           MIN_DOLLAR_VOL:     '10000000'
