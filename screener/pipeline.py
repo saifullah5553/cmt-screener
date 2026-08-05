@@ -15,7 +15,7 @@ import pandas as pd
 
 from . import analysis, marketdata, notify, regime as regime_mod
 from . import markets as mk
-from . import strength, universe
+from . import rungate, strength, universe
 from .config import CONFIG
 
 log = logging.getLogger("screener")
@@ -51,14 +51,21 @@ def run(cfg=None) -> int:
     now_utc = datetime.now(ZoneInfo("UTC"))
 
     active = mk.resolve(cfg.markets)
-    sessions = {}
     for m in active:
-        s = m.last_completed_session(now_utc)
-        sessions[m.code] = s
-        log.info("%-3s %-22s session=%s%s", m.code, m.name, s,
-                 "  (market OPEN — using previous close)" if m.is_open(now_utc) else "")
+        log.info("%-3s %-22s session=%s%s", m.code, m.name,
+                 m.last_completed_session(now_utc),
+                 "  (OPEN now)" if m.is_open(now_utc) else "")
 
-    if not any(sessions.values()) and not cfg.force_run:
+    # Timing gate. GitHub cron fires hours late and irregularly, so the run
+    # decides for itself whether this moment is suitable — see rungate.py.
+    proceed, signature, reason = rungate.should_run(cfg, now_utc)
+    if not proceed:
+        log.info("Skipping this invocation: %s", reason)
+        return 0
+    log.info("Proceeding: %s", reason)
+
+    sessions = {m.code: m.last_completed_session(now_utc) for m in active}
+    if not any(sessions.values()):
         log.info("No completed sessions across any market. Exiting cleanly.")
         return 0
 
@@ -171,6 +178,10 @@ def run(cfg=None) -> int:
         notify.send_message(m, cfg)
     if any(r["grade"] in ("A", "B", "W") for r in rows):
         notify.send_document(CSV_PATH, "Breakout screen detail", cfg)
+
+    # Record what was reported so later firings today don't repeat it.
+    if not cfg.force_run:
+        rungate.write_state(signature, now_utc)
 
     log.info("Done in %.1fs", (datetime.now() - started).total_seconds())
     return 0

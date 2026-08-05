@@ -1,25 +1,27 @@
 name: Global CMT Breakout Screener
 
-# Runs daily at 13:00 UTC = 17:00 Dubai (GMT+4).
+# DO NOT read these cron lines as "the alert time" — they are wake-ups, not
+# the schedule. GitHub Actions cron is unreliable: measured on this repository,
+# a single '0 13 * * *' entry actually executed at 18:21, 23:02, 20:31, 20:31,
+# 22:13 and 22:03 UTC on consecutive days (5-10 hours late, every day).
 #
-# Every covered market is closed at this moment, year-round through both DST
-# regimes. Measured all-closed windows: 12:30-14:00 UTC in January and
-# 12:00-13:00 UTC in July — 13:00 is the latest slot inside both.
+# Firing mid-session is not harmless: candidates get discovered from TODAY's
+# intraday movers while the analysis correctly uses the last COMPLETED candle,
+# so those names show no breakout and are all rejected. That is why US names
+# were silently missing from the alerts while Asia/Gulf names came through.
 #
-#   Closed by then (same-day sessions):
-#     KW 09:30 · NSE/BSE 10:00 · QA 10:15 · PSX 10:30 · AE 11:00
-#     SA 12:00 · EG 12:30 UTC · ASX closed 05:00-06:00 UTC
-#   US NYSE/NASDAQ has NOT yet opened (13:30 UTC EDT / 14:30 UTC EST),
-#     so the US reports YESTERDAY's completed session — intended.
+# So the job now wakes hourly and screener/rungate.py decides whether the
+# moment is suitable:
+#   * any covered market still trading  -> skip (data would be partial)
+#   * this session set already alerted   -> skip (no duplicates)
+# Skipped wake-ups exit in seconds, before any data is downloaded.
 #
-# Each market resolves its own last COMPLETED session (screener/markets.py),
-# so nothing is ever analysed mid-trade. If GitHub fires the job late and the
-# US has opened, the US simply falls back to the same previous close.
-#
-# GitHub cron is always UTC and observes no DST; Dubai has no DST either.
+# Result: exactly one alert per session set, every market complete, delivered
+# as soon after the all-closed window opens as GitHub allows. For delivery at
+# a precise clock time, drive workflow_dispatch from an external cron instead.
 on:
   schedule:
-    - cron: '0 13 * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:        # manual "Run workflow" button in the Actions tab
     inputs:
       force_run:
@@ -91,15 +93,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-      # Heartbeat: always leaves a fresh commit so the repo never looks idle and
-      # GitHub keeps firing the daily schedule. Runs even if the screener step
-      # failed, so a quiet day still counts as activity.
-      - name: Heartbeat commit (keeps the daily schedule alive)
+      # Persists .screener_state.json (which session set was last alerted) so a
+      # later wake-up today does not repeat the same alert, and last_run.txt so
+      # the repo never looks idle to GitHub's 60-day inactivity check.
+      # Rebases before pushing because hourly wake-ups can overlap.
+      - name: Persist run state
         if: always()
         run: |
           date -u +"last run: %Y-%m-%dT%H:%M:%SZ  (run #${GITHUB_RUN_NUMBER})" > last_run.txt
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add last_run.txt
-          git commit -m "chore: screener heartbeat" || echo "nothing to commit"
-          git push
+          git add last_run.txt .screener_state.json 2>/dev/null || git add last_run.txt
+          git commit -m "chore: screener state" || echo "nothing to commit"
+          for i in 1 2 3; do
+            git pull --rebase --autostash -q && git push -q && break
+            echo "push retry $i"; sleep 5
+          done

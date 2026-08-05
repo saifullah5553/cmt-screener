@@ -322,6 +322,85 @@ class TestMultiMarket:
         assert len(out) == len(df) - 2
 
 
+# --------------------------------------------------------------- run gate
+class TestRunGate:
+    """GitHub cron fired 5-10 hours late every day, landing mid-US-session.
+    The gate must refuse those moments rather than emit a US-less alert."""
+
+    from zoneinfo import ZoneInfo as _Z
+    UTC = _Z("UTC")
+
+    def _cfg(self, tmp_path, markets=None):
+        cfg = Config()
+        cfg.markets = markets or ["US", "IN", "PK", "SA"]
+        cfg.force_run = False
+        return cfg
+
+    def _at(self, h, mi=0):
+        return datetime(2026, 7, 29, h, mi, tzinfo=self.UTC)
+
+    def _isolate(self, tmp_path, monkeypatch):
+        from screener import rungate
+        monkeypatch.setattr(rungate, "STATE_FILE", str(tmp_path / "state.json"))
+        return rungate
+
+    def test_refuses_to_run_while_us_is_trading(self, tmp_path, monkeypatch):
+        """18:21 UTC — the actual observed run time. US is mid-session."""
+        rg = self._isolate(tmp_path, monkeypatch)
+        ok, _, reason = rg.should_run(self._cfg(tmp_path), self._at(18, 21))
+        assert ok is False and "US" in reason
+
+    def test_runs_once_all_markets_closed(self, tmp_path, monkeypatch):
+        rg = self._isolate(tmp_path, monkeypatch)
+        ok, sig, _ = rg.should_run(self._cfg(tmp_path), self._at(21, 30))
+        assert ok is True and sig
+
+    def test_does_not_repeat_the_same_session_set(self, tmp_path, monkeypatch):
+        rg = self._isolate(tmp_path, monkeypatch)
+        cfg = self._cfg(tmp_path)
+        t = self._at(21, 30)
+        ok, sig, _ = rg.should_run(cfg, t)
+        assert ok is True
+        rg.write_state(sig, t)
+        ok2, _, reason = rg.should_run(cfg, self._at(22, 30))
+        assert ok2 is False and "already" in reason
+
+    def test_new_session_set_alerts_again_next_day(self, tmp_path, monkeypatch):
+        rg = self._isolate(tmp_path, monkeypatch)
+        cfg = self._cfg(tmp_path)
+        _, sig, _ = rg.should_run(cfg, self._at(21, 30))
+        rg.write_state(sig, self._at(21, 30))
+        tomorrow = datetime(2026, 7, 30, 21, 30, tzinfo=self.UTC)
+        ok, sig2, _ = rg.should_run(cfg, tomorrow)
+        assert ok is True and sig2 != sig
+
+    def test_only_one_alert_per_utc_day_across_both_windows(self, tmp_path, monkeypatch):
+        """A UTC day has TWO all-closed windows (midday, and after the US
+        close). They carry different session sets, so without a date-keyed
+        guard the user would be alerted twice every day."""
+        rg = self._isolate(tmp_path, monkeypatch)
+        cfg = self._cfg(tmp_path, markets=["US", "IN"])
+        midday = self._at(12, 30)
+        ok, sig, _ = rg.should_run(cfg, midday)
+        assert ok is True
+        rg.write_state(sig, midday)
+        ok2, sig2, reason = rg.should_run(cfg, self._at(21, 30))
+        assert sig2 != sig                    # genuinely a different session set
+        assert ok2 is False and "today" in reason
+
+    def test_force_run_bypasses_the_gate(self, tmp_path, monkeypatch):
+        rg = self._isolate(tmp_path, monkeypatch)
+        cfg = self._cfg(tmp_path)
+        cfg.force_run = True
+        ok, _, reason = rg.should_run(cfg, self._at(18, 21))   # mid-US-session
+        assert ok is True and reason == "forced"
+
+    def test_signature_captures_every_market_session(self, tmp_path):
+        from screener import markets as mk
+        sig = mk.session_signature(["US", "IN"], self._at(21, 30))
+        assert "US:" in sig and "IN:" in sig
+
+
 # -------------------------------------------------------------- watchlist
 class TestWatchlist:
     """A watch name is one whose ONLY failing test is that price has not yet

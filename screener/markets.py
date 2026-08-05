@@ -200,6 +200,22 @@ def resolve(codes) -> list[Market]:
     return out
 
 
+def open_markets(codes, now_utc: datetime | None = None) -> list[str]:
+    """Which of the requested markets are trading right now."""
+    return [m.code for m in resolve(codes) if m.is_open(now_utc)]
+
+
+def session_signature(codes, now_utc: datetime | None = None) -> str:
+    """Stable id for 'the set of sessions this run would report'.
+
+    Used to guarantee one alert per session-set no matter how many times the
+    scheduler fires — GitHub's cron has been observed running 5-10 hours late
+    and at irregular times, so runs cannot be assumed to be once-daily.
+    """
+    parts = [f"{m.code}:{m.last_completed_session(now_utc)}" for m in resolve(codes)]
+    return "|".join(parts)
+
+
 def market_of(symbol: str) -> str:
     """Infer the market code from a Yahoo ticker suffix."""
     s = str(symbol).upper()
