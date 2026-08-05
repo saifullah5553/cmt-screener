@@ -21,7 +21,12 @@ name: Global CMT Breakout Screener
 # a precise clock time, drive workflow_dispatch from an external cron instead.
 on:
   schedule:
-    - cron: '0 * * * *'
+    # Dense wake-ups across the target window so that, despite GitHub's lag,
+    # one execution lands soon after 13:00 UTC (17:00 Dubai).
+    - cron: '*/10 13-15 * * *'
+    # Sparse hourly cover for the rest of the day, so a badly delayed day still
+    # delivers rather than being skipped entirely.
+    - cron: '0 0-12,16-23 * * *'
   workflow_dispatch:        # manual "Run workflow" button in the Actions tab
     inputs:
       force_run:
@@ -41,20 +46,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Decide FIRST, using only the standard library, before paying for a
+      # dependency install. A skipped wake-up therefore costs a few seconds.
+      - name: Should this wake-up run?
+        id: gate
+        env:
+          MARKETS:             'ALL'
+          RUN_NOT_BEFORE_UTC:  '13:00'
+          FORCE_RUN:           ${{ github.event.inputs.force_run || 'false' }}
+        run: python3 gatecheck.py
+
       - uses: actions/setup-python@v5
+        if: steps.gate.outputs.proceed == 'true'
         with:
           python-version: '3.12'
           cache: 'pip'
 
       - name: Install dependencies
+        if: steps.gate.outputs.proceed == 'true'
         run: pip install -r requirements.txt
 
       # Fast unit tests (no network) — catches a broken deploy BEFORE the
       # screen runs, rather than discovering it from a silent empty alert.
       - name: Run tests
+        if: steps.gate.outputs.proceed == 'true'
         run: python -m pytest tests/ -q
 
       - name: Run screener
+        if: steps.gate.outputs.proceed == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -90,7 +109,7 @@ jobs:
         run: python cmt_screener.py
 
       - name: Upload results
-        if: always()
+        if: always() && steps.gate.outputs.proceed == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: screener-results
@@ -102,9 +121,10 @@ jobs:
       # Persists .screener_state.json (which session set was last alerted) so a
       # later wake-up today does not repeat the same alert, and last_run.txt so
       # the repo never looks idle to GitHub's 60-day inactivity check.
-      # Rebases before pushing because hourly wake-ups can overlap.
+      # Only on wake-ups that actually ran, so skipped ones leave no commit
+      # noise. Rebases before pushing because wake-ups can overlap.
       - name: Persist run state
-        if: always()
+        if: always() && steps.gate.outputs.proceed == 'true'
         run: |
           date -u +"last run: %Y-%m-%dT%H:%M:%SZ  (run #${GITHUB_RUN_NUMBER})" > last_run.txt
           git config user.name  "github-actions[bot]"
