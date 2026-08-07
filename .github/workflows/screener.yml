@@ -21,12 +21,17 @@ name: Global CMT Breakout Screener
 # a precise clock time, drive workflow_dispatch from an external cron instead.
 on:
   schedule:
-    # Dense wake-ups across the target window so that, despite GitHub's lag,
-    # one execution lands soon after 13:00 UTC (17:00 Dubai).
-    - cron: '*/10 13-15 * * *'
-    # Sparse hourly cover for the rest of the day, so a badly delayed day still
-    # delivers rather than being skipped entirely.
-    - cron: '0 0-12,16-23 * * *'
+    # BILLING NOTE: GitHub charges per minute ROUNDED UP, so a wake-up that
+    # skips in 15 seconds still costs a full billed minute. Wake-up count is
+    # therefore roughly minutes-per-day. Keep this list short: an earlier
+    # */10 schedule came to ~39 runs/day (~1,200 min/month against a 2,000
+    # free-minute allowance) and led to jobs being cancelled.
+    #
+    # Three attempts in the target hour, then thinning fallbacks. The gate
+    # sends on the first one at/after 13:00 UTC (17:00 Dubai) and the rest
+    # skip, so extra entries only ever buy resilience against GitHub lag.
+    - cron: '0,20,40 13 * * *'
+    - cron: '0 14,16,18,21 * * *'
   workflow_dispatch:        # manual "Run workflow" button in the Actions tab
     inputs:
       force_run:
@@ -40,9 +45,19 @@ on:
 permissions:
   contents: write
 
+# Wake-ups must never pile up or race each other: two runs pushing the state
+# commit at once is how the dedup file gets lost. Queue them instead, and never
+# cancel a run that is already doing real work.
+concurrency:
+  group: screener
+  cancel-in-progress: false
+
 jobs:
   screen:
     runs-on: ubuntu-latest
+    # A healthy run finishes in ~2 minutes; this stops a hung run from burning
+    # the monthly allowance.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
