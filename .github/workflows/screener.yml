@@ -27,11 +27,22 @@ on:
     # */10 schedule came to ~39 runs/day (~1,200 min/month against a 2,000
     # free-minute allowance) and led to jobs being cancelled.
     #
-    # Three attempts in the target hour, then thinning fallbacks. The gate
-    # sends on the first one at/after 13:00 UTC (17:00 Dubai) and the rest
-    # skip, so extra entries only ever buy resilience against GitHub lag.
-    - cron: '0,20,40 13 * * *'
-    - cron: '0 14,16,18,21 * * *'
+    # EVERY slot below is one where all nine markets are shut in BOTH DST
+    # regimes - verified, not assumed. Only two such windows exist per day:
+    #
+    #   13:00-13:20 UTC  (17:00-17:20 Dubai)  US not yet open -> reports yesterday
+    #   21:00-22:30 UTC  (01:00-02:30 Dubai)  US closed       -> reports today
+    #
+    # 13:40 UTC is NOT usable (US opens 13:30 UTC on EDT) and 14:00-20:30 can
+    # never alert at all, so earlier entries there were pure waste. GitHub
+    # drops scheduled runs freely, so the point of multiple entries is simply
+    # to have several chances inside a window that can actually fire.
+    #
+    # Preferred window - the requested 17:00 Dubai delivery.
+    - cron: '0,10,20 13 * * *'
+    # Fallback window - only reached if every attempt above was dropped, and
+    # it carries a bonus: by then the US has closed, so it reports TODAY.
+    - cron: '0,30 21,22 * * *'
   workflow_dispatch:        # manual "Run workflow" button in the Actions tab
     inputs:
       force_run:

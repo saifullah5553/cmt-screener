@@ -536,3 +536,58 @@ class TestGateCheckScript:
                            text=True, cwd=root, env=env)
         assert r.returncode == 0
         assert "proceed=true" in out.read_text()
+
+
+# ------------------------------------------------------- schedule validity
+class TestScheduleSlots:
+    """Every cron slot must be a moment when the gate CAN actually alert.
+
+    Learned the hard way: slots at 14:00-20:30 UTC can never fire (the US is
+    open), and 13:40 UTC works in winter but not summer. Wake-ups parked there
+    are silently useless, and because GitHub drops scheduled runs freely, the
+    surviving ones landed only on those dead slots and no alert went out at all.
+    """
+
+    from zoneinfo import ZoneInfo as _Z
+    UTC = _Z("UTC")
+
+    def _slots(self):
+        import yaml
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, ".github/workflows/screener.yml"),
+                  encoding="utf-8") as f:
+            d = yaml.safe_load(f)
+        out = []
+        for c in [c["cron"] for c in d[True]["schedule"]]:
+            mins, hrs = c.split()[0], c.split()[1]
+            for h in hrs.split(","):
+                for m in mins.split(","):
+                    out.append((int(h), int(m)))
+        return sorted(out)
+
+    def test_every_slot_has_all_markets_closed_both_dst_regimes(self):
+        from screener import markets as mk
+        for h, m in self._slots():
+            for mo, dy in ((1, 14), (7, 15)):     # winter and summer
+                t = datetime(2026, mo, dy, h, m, tzinfo=self.UTC)
+                still_open = mk.open_markets(["ALL"], t)
+                assert still_open == [], (
+                    f"{h:02d}:{m:02d}Z is a dead slot in month {mo}: "
+                    f"{still_open} still trading")
+
+    def test_slots_are_at_or_after_target_time(self):
+        from screener.config import Config
+        target = Config().run_not_before_utc
+        hh, mm = (int(x) for x in target.split(":"))
+        floor = hh * 60 + mm
+        for h, m in self._slots():
+            assert h * 60 + m >= floor, f"{h:02d}:{m:02d}Z is before {target}"
+
+    def test_schedule_stays_within_free_minute_allowance(self):
+        """GitHub bills per minute rounded up, so wake-ups/day ~= minutes/day."""
+        assert len(self._slots()) * 31 < 1000, "schedule too expensive"
+
+    def test_preferred_window_has_multiple_attempts(self):
+        """GitHub drops runs, so one attempt at the target is not enough."""
+        early = [s for s in self._slots() if s[0] == 13]
+        assert len(early) >= 3
