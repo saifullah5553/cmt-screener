@@ -38,10 +38,14 @@ on:
     # drops scheduled runs freely, so the point of multiple entries is simply
     # to have several chances inside a window that can actually fire.
     #
-    # Preferred window - the requested 17:00 Dubai delivery.
-    - cron: '0,10,20 13 * * *'
-    # Fallback window - only reached if every attempt above was dropped, and
-    # it carries a bonus: by then the US has closed, so it reports TODAY.
+    # PREFERRED - the requested 17:00 Dubai delivery. The usable window is only
+    # 13:00-13:20 UTC (the US opens 13:30 UTC on EDT), so it is packed at the
+    # 5-minute minimum GitHub allows: five chances for at least one to survive
+    # being dropped. The gate sends on the first and skips the rest.
+    - cron: '0,5,10,15,20 13 * * *'
+    # FALLBACK - only reached if all five above were dropped, so the day is
+    # never lost. Arrives 01:00-02:30 Dubai but reports the US session that
+    # closed that same day rather than the previous one.
     - cron: '0,30 21,22 * * *'
   workflow_dispatch:        # manual "Run workflow" button in the Actions tab
     inputs:
